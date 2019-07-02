@@ -160,7 +160,7 @@ mod tests {
 
     #[cfg(feature = "docker")]
     #[test]
-    fn it_works() {
+    fn temp_pg() {
         let result = with_temporary_postgres(|params, tls_mode, _| -> Result<()> {
             // let conn = Connection::connect(params.clone(), clone_tls_mode(&tls_mode))?;
             let result =
@@ -174,6 +174,27 @@ mod tests {
         })
         .unwrap();
         result.unwrap();
-        assert_eq!(2 + 2, 4);
+    }
+
+    #[test]
+    fn temp_db() {
+        let connect_params = ConnectParams::builder()
+            .port(5432)
+            // .user("postgres", Some("postgres"))
+            .user("postgres", None)
+            .database("postgres")
+            .build(params::Host::Tcp("localhost".to_owned()));
+        // let conn = Connection::connect(params.clone(), clone_tls_mode(&tls_mode))?;
+        let result = with_temporary_database(
+            connect_params,
+            TlsMode::None,
+            |params, tls_mode| -> Result<()> {
+                let conn = Connection::connect(params, tls_mode)?;
+                conn.batch_execute("CREATE TABLE test")?;
+                conn.execute("TABLE FROM test", &[])?;
+                Ok(())
+            },
+        ).unwrap();
+        result.unwrap();
     }
 }
