@@ -1,8 +1,11 @@
+#![warn(clippy::all)]
 use std::time::Duration;
 
 use derive_more::From;
+use log::*;
 use postgres::params::{self, ConnectParams};
 use postgres::{Connection, TlsMode};
+use rand::{distributions, thread_rng, Rng};
 
 #[derive(From, Debug)]
 pub enum Error {
@@ -15,6 +18,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+// TODO allow passing a version via PostgresConfig
 #[cfg(feature = "docker")]
 pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) -> T>(
     f: F,
@@ -93,24 +97,45 @@ pub fn clone_tls_mode<'a>(tls_mode: &TlsMode<'a>) -> TlsMode<'a> {
     }
 }
 
+/// Generate a random string of [a-z0-9]
+/// Lowercase so that just in case I forget to quote wrap something, it is
+/// still interpreted correctly, since in postgres, identifier A and a are
+/// equivalent.
+fn random_string(length: usize) -> String {
+    let mut rng = thread_rng();
+    std::iter::repeat(())
+        .map(|()| rng.sample(distributions::Alphanumeric).to_ascii_lowercase())
+        // .map(|()| rng.sample(distributions::Alphanumeric))
+        .take(length)
+        .collect()
+}
+
+macro_rules! try_ {
+    ($e:block) => {
+        (|| Ok($e))()
+    };
+}
+
 /// Methodology taken from http://wiki.postgresql.org/wiki/Shared_Database_Hosting
 pub fn with_temporary_database<T, F: FnOnce(ConnectParams, TlsMode) -> T>(
     params: ConnectParams,
     tls_mode: TlsMode,
     f: F,
 ) -> Result<T> {
-    // TODO generate random name
-    let dbname = "asdasldkjflskf";
-    let dbmainuser = dbname;
-    // TODO properly escape this
-    let dbmainuserpass = "ASLDKFJALSKDJ";
+    let dbname = format!("kpg_fixture_{}", random_string(20));
+    // I can skip escaping this since the value is alphanumeric
+    let dbmainuserpass = random_string(32);
 
+    debug!(
+        "Creating database {:?} with password {:?} and default user {:?}",
+        dbname, dbmainuserpass, dbname
+    );
     let new_params = {
         let mut new_params = ConnectParams::builder();
         new_params
             .port(params.port())
-            .user(dbmainuser, Some(dbmainuserpass))
-            .database(dbname)
+            .user(&dbname, Some(&dbmainuserpass))
+            .database(&dbname)
             .connect_timeout(params.connect_timeout());
         for (key, value) in params.options() {
             new_params.option(key, value);
@@ -121,29 +146,41 @@ pub fn with_temporary_database<T, F: FnOnce(ConnectParams, TlsMode) -> T>(
 
     let conn = Connection::connect(params, clone_tls_mode(&tls_mode))?;
 
-    /* TODO
-     * thread 'tests::it_works' panicked at 'called `Result::unwrap()` on an `Err` value: Postgres(Error(Db(DbError { severity: "ERROR", parsed_severity: Some(Error), code: SqlState("25001"), message: "CREATE DATABASE cannot run inside a transaction block", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: Some("xact.c"), line: Some(3213), routine: Some("PreventInTransactionBlock") })))', src/libcore/result.rs:997:5
-     * note: Run with `RUST_BACKTRACE=1` environment variable to display a backtrace.
-     */
     // Setup a new user
-    conn.batch_execute(&format!(r#"
-CREATE ROLE {dbname} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT LOGIN ENCRYPTED PASSWORD '{dbmainuserpass}';
-CREATE DATABASE {dbname} WITH OWNER={dbname};
-REVOKE ALL ON DATABASE {dbname} FROM public;
-     "#, dbname=dbname, dbmainuserpass=dbmainuserpass))?;
-
-    let result = f(new_params, tls_mode);
-
-    // Cleanup
+    // These must be executed separately since CREATE/DROP DATABASE cannot be executed inside a
+    // transaction and multi-statement queries are implicitly wrapped in a transaction.
+    // Ref: https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
+    debug!("Setting up database");
     conn.batch_execute(&format!(
-        r#"
-DROP DATABASE {dbname};
-DROP ROLE {dbname};
-    "#,
+        "CREATE ROLE {dbname:?}
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+            LOGIN ENCRYPTED PASSWORD '{dbmainuserpass}';",
+        // Interpolating like this is safe since I use an Alphanumeric distribution
         dbname = dbname,
+        dbmainuserpass = dbmainuserpass
     ))?;
-    // let conn = conn.execute(format!("SET SESSION AUTHORIZATION {}", dbmainuser), &[])?;
-    Ok(result)
+    // Try block this so I can rollback incrementally.
+    let result = try_!({
+        conn.batch_execute(&format!(
+            "CREATE DATABASE {dbname:?} WITH OWNER={dbname:?};",
+            dbname = dbname
+        ))?;
+        let result: Result<T> = try_!({
+            conn.batch_execute(&format!(
+                "REVOKE ALL ON DATABASE {dbname:?} FROM public;",
+                dbname = dbname
+            ))?;
+            debug!("Finished setting up database");
+
+            f(new_params, tls_mode)
+        });
+        debug!("Starting cleanup");
+        conn.batch_execute(&format!("DROP DATABASE {dbname:?};", dbname = dbname))?;
+        result?
+    });
+    conn.batch_execute(&format!("DROP ROLE {dbname:?};", dbname = dbname))?;
+    debug!("Finished cleanup");
+    result
 }
 
 // /// Methodology taken from http://wiki.postgresql.org/wiki/Shared_Database_Hosting
@@ -158,26 +195,37 @@ DROP ROLE {dbname};
 mod tests {
     use super::*;
 
+    use std::sync::{Once, ONCE_INIT};
+
+    static INIT: Once = ONCE_INIT;
+
     #[cfg(feature = "docker")]
     #[test]
     fn temp_pg() {
+        INIT.call_once(|| {
+            env_logger::init();
+        });
+
         let result = with_temporary_postgres(|params, tls_mode, _| -> Result<()> {
             // let conn = Connection::connect(params.clone(), clone_tls_mode(&tls_mode))?;
-            let result =
-                with_temporary_database(params, tls_mode, |params, tls_mode| -> Result<()> {
-                    let conn = Connection::connect(params, tls_mode)?;
-                    conn.batch_execute("CREATE TABLE test")?;
-                    conn.execute("TABLE FROM test", &[])?;
-                    Ok(())
-                })?;
-            result
+            with_temporary_database(params, tls_mode, |params, tls_mode| -> Result<()> {
+                let conn = Connection::connect(params, tls_mode)?;
+                conn.batch_execute("CREATE TABLE test()")?;
+                conn.execute("TABLE test", &[])?;
+                Ok(())
+            })?
         })
-        .unwrap();
-        result.unwrap();
+        .expect("Failed to create temporary database");
+        println!("{:#?}", result);
+        result.expect("Inner result failed");
     }
 
     #[test]
     fn temp_db() {
+        INIT.call_once(|| {
+            env_logger::init();
+        });
+
         let connect_params = ConnectParams::builder()
             .port(5432)
             // .user("postgres", Some("postgres"))
@@ -190,11 +238,13 @@ mod tests {
             TlsMode::None,
             |params, tls_mode| -> Result<()> {
                 let conn = Connection::connect(params, tls_mode)?;
-                conn.batch_execute("CREATE TABLE test")?;
-                conn.execute("TABLE FROM test", &[])?;
+                conn.batch_execute("CREATE TABLE test()")?;
+                conn.execute("TABLE test", &[])?;
                 Ok(())
             },
-        ).unwrap();
-        result.unwrap();
+        )
+        .expect("Failed to create temporary database");
+        println!("{:#?}", result);
+        result.expect("Inner result failed");
     }
 }
