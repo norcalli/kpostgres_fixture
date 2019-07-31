@@ -1,8 +1,11 @@
 [package]
 name = "kpostgres_fixture"
 version = "0.1.0"
-authors = ["Ashkan Kiani <ashkan.k.kiani@gmail.com>"]
+authors = ["Ashkan Kiani <dev.kpostgres_fixture@kiani.io>"]
 edition = "2018"
+license = "MIT"
+description = "Fixture for setting up a temporary database or a temporary postgres instance and running code in an isolated environment for testing"
+keywords = ["postgres", "testing", "docker"]
 
 [dependencies]
 dockworker = { version = "0.0.13", optional = true }

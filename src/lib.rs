@@ -18,8 +18,13 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-// TODO allow passing a version via PostgresConfig
 #[cfg(feature = "docker")]
+/// Create a temporary postgres:11 docker instance and pass the params
+/// required to create a connection to the closure, along with the postgres
+/// connection used to create this instance if you don't want to create
+/// your own connection.
+///
+/// TODO allow passing a version via PostgresConfig
 pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) -> T>(
     f: F,
 ) -> Result<T> {
@@ -105,7 +110,6 @@ fn random_string(length: usize) -> String {
     let mut rng = thread_rng();
     std::iter::repeat(())
         .map(|()| rng.sample(distributions::Alphanumeric).to_ascii_lowercase())
-        // .map(|()| rng.sample(distributions::Alphanumeric))
         .take(length)
         .collect()
 }
@@ -116,6 +120,16 @@ macro_rules! try_ {
     };
 }
 
+/// Given the parameters to connect to an existing postgres database, create
+/// new credentials to a temporary database for isolated testing.
+///
+/// CREATE DATABASE inside an existing postgres instance with
+/// random credentials and a random database name and pass the params
+/// required to create a connection to the closure and the TlsMode.
+///
+/// We pass the parameters so that you can create a connection however you want,
+/// with whatever library you want.
+///
 /// Methodology taken from http://wiki.postgresql.org/wiki/Shared_Database_Hosting
 pub fn with_temporary_database<T, F: FnOnce(ConnectParams, TlsMode) -> T>(
     params: ConnectParams,
@@ -140,7 +154,6 @@ pub fn with_temporary_database<T, F: FnOnce(ConnectParams, TlsMode) -> T>(
         for (key, value) in params.options() {
             new_params.option(key, value);
         }
-        // new_params.option("AUTOCOMMIT", "ON");
         new_params.build(params.host().clone())
     };
 
