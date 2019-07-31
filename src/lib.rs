@@ -24,8 +24,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// connection used to create this instance if you don't want to create
 /// your own connection.
 ///
+/// Takes the image used as a base as a parameter
 /// TODO allow passing a version via PostgresConfig
 pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) -> T>(
+    docker_image: &str,
     f: F,
 ) -> Result<T> {
     use std::borrow::Borrow;
@@ -36,7 +38,7 @@ pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) 
     let container_id = docker
         .create_container(
             None,
-            dockworker::ContainerCreateOptions::new("postgres:11")
+            dockworker::ContainerCreateOptions::new(docker_image)
                 .host_config(container_host_config),
         )?
         .id;
@@ -52,15 +54,17 @@ pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) 
 
             let container = container.first().unwrap();
 
-            let postgres_port = dbg!(&container.Ports)
+            let postgres_port = &container
+                .Ports
                 .iter()
                 .filter(|p| p.PrivatePort == 5432)
                 .flat_map(|p| p.PublicPort)
                 .next()
                 .ok_or_else(|| Error::DockerCreationFailed("Failed to find postgres port"))?;
 
+            info!("Postgres at port {} created", postgres_port);
             let connect_params = ConnectParams::builder()
-                .port(dbg!(postgres_port as u16))
+                .port(*postgres_port as u16)
                 // .user("postgres", Some("postgres"))
                 .user("postgres", None)
                 .database("postgres")
@@ -94,6 +98,8 @@ pub fn with_temporary_postgres<T, F: FnOnce(ConnectParams, TlsMode, Connection) 
     Ok(result?)
 }
 
+
+/// Helper function since TlsMode doesn't implement clone.
 pub fn clone_tls_mode<'a>(tls_mode: &TlsMode<'a>) -> TlsMode<'a> {
     match tls_mode {
         TlsMode::None => TlsMode::None,
@@ -219,7 +225,7 @@ mod tests {
             env_logger::init();
         });
 
-        let result = with_temporary_postgres(|params, tls_mode, _| -> Result<()> {
+        let result = with_temporary_postgres("postgres:11", |params, tls_mode, _| -> Result<()> {
             // let conn = Connection::connect(params.clone(), clone_tls_mode(&tls_mode))?;
             with_temporary_database(params, tls_mode, |params, tls_mode| -> Result<()> {
                 let conn = Connection::connect(params, tls_mode)?;

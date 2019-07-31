@@ -28,7 +28,7 @@ mod tests {
             env_logger::init();
         });
 
-        let result = with_temporary_postgres(|params, tls_mode, _| -> Result<()> {
+        let result = with_temporary_postgres("postgres:11", |params, tls_mode, _| -> Result<()> {
             with_temporary_database(params, tls_mode, |params, tls_mode| -> Result<()> {
                 let conn = Connection::connect(params, tls_mode)?;
                 conn.batch_execute("CREATE TABLE test()")?;
