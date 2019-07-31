@@ -6,6 +6,8 @@ edition = "2018"
 license = "MIT"
 description = "Fixture for setting up a temporary database or a temporary postgres instance and running code in an isolated environment for testing"
 keywords = ["postgres", "testing", "docker"]
+homepage = "https://github.com/norcalli/kpostgres_fixture"
+repository = "https://github.com/norcalli/kpostgres_fixture"
 
 [dependencies]
 dockworker = { version = "0.0.13", optional = true }
